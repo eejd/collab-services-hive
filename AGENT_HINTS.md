@@ -34,7 +34,8 @@ Read in this order:
 
 - Continuwuity uses RocksDB; **never binary-swap** database files between Continuwuity, Tuwunel, or Conduit forks — database schemas diverge and swapping causes corruption.
 - The iMessage bridge is a hardware-locked satellite: it must run on a macOS machine with active iMessage credentials. It connects **outbound** to wsproxy — no inbound ports needed on the Mac.
-- All external traffic routes through Traefik (private-network-hive) on `hive-net`. Continuwuity is not directly exposed.
+- Continuwuity and wsproxy run on the **Gandi VPS** (static public IP); bridges run on the primary node (Colima). Caddy on the VPS handles TLS for ports 8448 and 443. Traefik is not involved in Matrix routing.
+- Bridges connect to homeserver via ZeroTier appservice API: `homeserver.url = http://${COLLAB_VPS_ZT_IP}:6167`. Homeserver callbacks to bridges use `COLLAB_PRIMARY_ZT_IP`.
 - Port 8448 (Matrix federation) must be registered in queen-hive's `CONFLICT_ANALYSIS.md`.
 
 ## Package Manager Baseline
@@ -51,8 +52,8 @@ collab-services-hive issues link to the `hive-portfolio` project (#5) in the `ee
 
 | Phase | Focus | Status |
 |---|---|---|
-| 0 | Bootstrap (docs, repo, compose skeleton) | 🔄 In progress |
-| 1 | Continuwuity homeserver + Traefik routing | 🔲 Not started |
+| 0 | Bootstrap (docs, repo, compose skeleton, cshive CLI) | ✅ Complete |
+| 1 | Continuwuity homeserver on VPS + Caddy TLS | 🔲 Not started |
 | 2 | Core bridges (WhatsApp, Signal, Discord) | 🔲 Not started |
 | 3 | iMessage relay (wsproxy + macOS satellite) | 🔲 Not started |
 | 4 | AI agent integration (MCP Matrix server) | 🔲 Not started |
