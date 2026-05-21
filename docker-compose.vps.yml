@@ -1,0 +1,102 @@
+---
+# collab-services-hive — VPS Stack (Gandi VPS)
+# Managed by: cshive start|stop|status|update vps
+# Deployed via: DOCKER_HOST=ssh://${COLLAB_VPS_SSH_HOST} docker compose -f docker-compose.vps.yml
+#
+# Services: Continuwuity (homeserver) + Caddy (TLS) + mautrix-wsproxy (iMessage relay)
+# Bridges run on the primary node — see docker-compose.yml
+#
+# VPS prerequisites:
+#   - Docker installed and running
+#   - UFW: allow 80, 443, 8448/tcp (public); allow <SIGNAL/WHATSAPP/DISCORD_APPSERVICE_PORT> from ZT only
+#   - COLLAB_VPS_CONFIG_ROOT (/opt/collab by default) exists and contains config files
+#   - DNS: matrix.${MATRIX_DOMAIN} A record → VPS public IP
+
+name: collab-vps
+
+networks:
+  collab-vps-net:
+    driver: bridge
+
+volumes:
+  collab_continuwuity_data:
+    # RocksDB homeserver state. Backed up by: cshive backup (cold rsync to /zfs/Backup/hive/collab/).
+    # Never use virtiofs or a bind mount here — RocksDB requires a proper block device.
+  collab_caddy_data:
+    # Caddy certificate storage (ACME state). Persisted across restarts.
+  collab_caddy_config:
+    # Caddy runtime config cache.
+
+services:
+
+  # ── Continuwuity (Matrix homeserver) ────────────────────────────────────────
+  continuwuity:
+    image: girlbossceo/continuwuity:${CONTINUWUITY_VERSION:-latest}
+    container_name: collab-continuwuity
+    restart: unless-stopped
+    volumes:
+      - collab_continuwuity_data:/var/lib/continuwuity
+      - ${COLLAB_VPS_CONFIG_ROOT}/continuwuity:/etc/continuwuity:ro
+    networks:
+      - collab-vps-net
+    expose:
+      # Client-server API — accessed by Caddy (proxy) and directly from ZT by bridges/MCP.
+      - "${CONTINUWUITY_PORT:-6167}"
+    ports:
+      # Direct ZeroTier access for bridges and MCP server on primary node.
+      # NOT exposed publicly — Caddy handles the public-facing port 443.
+      - "127.0.0.1:${CONTINUWUITY_PORT:-6167}:${CONTINUWUITY_PORT:-6167}"
+    environment:
+      CONTINUWUITY_SERVER_NAME: "${MATRIX_SERVER_NAME}"
+      CONTINUWUITY_PORT: "${CONTINUWUITY_PORT:-6167}"
+      CONTINUWUITY_REGISTRATION_SHARED_SECRET: "${CONTINUWUITY_REGISTRATION_SHARED_SECRET}"
+      CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity
+      CONTINUWUITY_LOG: warn
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${CONTINUWUITY_PORT:-6167}/_matrix/client/versions"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── mautrix-wsproxy (iMessage relay) ─────────────────────────────────────────
+  wsproxy:
+    image: dock.mau.dev/mautrix/wsproxy:${WSPROXY_VERSION:-latest}
+    container_name: collab-wsproxy
+    restart: unless-stopped
+    networks:
+      - collab-vps-net
+    expose:
+      # iMessage relay WebSocket — accessible to macOS satellite over ZeroTier.
+      - "29331"
+    ports:
+      # Bound to 0.0.0.0 so the ZT interface on the VPS can forward iMessage traffic
+      # from the Mac Mini satellite (mautrix-imessage outbound TLS connection).
+      - "29331:29331"
+    environment:
+      LISTEN_ADDRESS: "0.0.0.0:29331"
+      AS_TOKEN: "${WSPROXY_AS_TOKEN}"
+      HS_TOKEN: "${WSPROXY_HS_TOKEN}"
+
+  # ── Caddy (TLS termination) ──────────────────────────────────────────────────
+  caddy:
+    image: caddy:${CADDY_VERSION:-latest}
+    container_name: collab-caddy
+    restart: unless-stopped
+    networks:
+      - collab-vps-net
+    ports:
+      - "80:80"     # ACME HTTP-01 challenge
+      - "443:443"   # Matrix client-server API + .well-known delegation
+      - "8448:8448" # Matrix server-to-server federation
+    volumes:
+      - ${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - collab_caddy_data:/data
+      - collab_caddy_config:/config
+    environment:
+      MATRIX_DOMAIN: "${MATRIX_DOMAIN}"
+      MATRIX_SERVER_NAME: "${MATRIX_SERVER_NAME}"
+      ACME_EMAIL: "${ACME_EMAIL}"
+      CONTINUWUITY_PORT: "${CONTINUWUITY_PORT:-6167}"
+    depends_on:
+      continuwuity:
+        condition: service_healthy

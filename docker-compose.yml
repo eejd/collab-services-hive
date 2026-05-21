@@ -1,0 +1,73 @@
+---
+# collab-services-hive — Primary Node Stack (M4 Mac Mini / Colima)
+# Managed by: cshive start|stop|status|update primary
+#
+# Services: mautrix-{signal,whatsapp,discord} bridges
+# Homeserver (Continuwuity) and wsproxy run on the Gandi VPS — see docker-compose.vps.yml
+#
+# Bridge ↔ homeserver communication:
+#   Bridge → homeserver: HTTP POST to http://${COLLAB_VPS_ZT_IP}:${CONTINUWUITY_PORT}
+#   Homeserver → bridge: HTTP POST to http://${COLLAB_PRIMARY_ZT_IP}:${*_APPSERVICE_PORT}
+#   The *_APPSERVICE_PORT values must be published below so the VPS can reach them.
+
+name: collab
+
+networks:
+  hive-net:
+    external: true
+
+volumes:
+  collab_signal_data:
+  collab_whatsapp_data:
+  collab_discord_data:
+
+services:
+
+  # ── Signal Bridge ────────────────────────────────────────────────────────────
+  signal:
+    image: dock.mau.dev/mautrix/signal:${MAUTRIX_SIGNAL_VERSION:-latest}
+    container_name: collab-signal
+    restart: unless-stopped
+    volumes:
+      - collab_signal_data:/data
+      - ${COLLAB_CONFIG_ROOT}/signal:/config:ro
+    networks:
+      - hive-net
+    ports:
+      # Appservice listener — homeserver (VPS) POSTs events here via ZeroTier.
+      # Must be reachable at COLLAB_PRIMARY_ZT_IP from the VPS.
+      - "${SIGNAL_APPSERVICE_PORT:-29328}:29328"
+    environment:
+      MAUTRIX_DIRECT_MEDIA_URL: ""
+    labels:
+      - "traefik.enable=false"
+
+  # ── WhatsApp Bridge ──────────────────────────────────────────────────────────
+  whatsapp:
+    image: dock.mau.dev/mautrix/whatsapp:${MAUTRIX_WHATSAPP_VERSION:-latest}
+    container_name: collab-whatsapp
+    restart: unless-stopped
+    volumes:
+      - collab_whatsapp_data:/data
+      - ${COLLAB_CONFIG_ROOT}/whatsapp:/config:ro
+    networks:
+      - hive-net
+    ports:
+      - "${WHATSAPP_APPSERVICE_PORT:-29318}:29318"
+    labels:
+      - "traefik.enable=false"
+
+  # ── Discord Bridge ───────────────────────────────────────────────────────────
+  discord:
+    image: dock.mau.dev/mautrix/discord:${MAUTRIX_DISCORD_VERSION:-latest}
+    container_name: collab-discord
+    restart: unless-stopped
+    volumes:
+      - collab_discord_data:/data
+      - ${COLLAB_CONFIG_ROOT}/discord:/config:ro
+    networks:
+      - hive-net
+    ports:
+      - "${DISCORD_APPSERVICE_PORT:-29334}:29334"
+    labels:
+      - "traefik.enable=false"

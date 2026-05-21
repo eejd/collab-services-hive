@@ -1,0 +1,30 @@
+# Caddyfile — collab-services-hive VPS
+# Copy to ${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile and set ACME_EMAIL in .env.
+# Caddy handles TLS automatically via Let's Encrypt (HTTP-01 or ACME DNS).
+#
+# After deploy, verify federation: https://federationtester.matrix.org/
+
+{
+    email {$ACME_EMAIL}
+}
+
+# Matrix client-server API + .well-known delegation (port 443)
+matrix.{$MATRIX_DOMAIN} {
+    # Client API
+    reverse_proxy /_matrix/* continuwuity:{$CONTINUWUITY_PORT}
+    reverse_proxy /_synapse/* continuwuity:{$CONTINUWUITY_PORT}
+
+    # Well-known delegation — tells clients which server to use
+    respond /.well-known/matrix/server `{"m.server":"matrix.{$MATRIX_DOMAIN}:8448"}` 200 {
+        header Content-Type application/json
+    }
+    respond /.well-known/matrix/client `{"m.homeserver":{"base_url":"https://matrix.{$MATRIX_DOMAIN}"}}` 200 {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *
+    }
+}
+
+# Matrix server-to-server federation (port 8448)
+matrix.{$MATRIX_DOMAIN}:8448 {
+    reverse_proxy continuwuity:{$CONTINUWUITY_PORT}
+}

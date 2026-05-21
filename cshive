@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/hive.sh
+source "${PROJECT_ROOT}/scripts/lib/hive.sh"
+
+usage() {
+    cat <<EOF
+cshive — collab-services-hive lifecycle manager
+
+LIFECYCLE:
+    start   [vps|primary|all]   Start services (default: all)
+    stop    [vps|primary|all]   Stop services (default: all)
+    restart [vps|primary|all]   Restart services (default: all)
+    status  [vps|primary]       Show service status (default: both)
+    update  [vps|primary|all]   Pull latest images and restart (default: all)
+
+OPERATIONS:
+    backup                      Cold backup: stop VPS → rsync RocksDB → restart VPS
+    verify                      Preflight: ZeroTier, SSH, homeserver health, bridge ports
+    logs <service>              Tail logs for a service (signal|whatsapp|discord|continuwuity|wsproxy|caddy)
+
+EXAMPLES:
+    cshive verify               # check prerequisites before first deploy
+    cshive start                # start both stacks
+    cshive status               # show all service status
+    cshive logs whatsapp        # tail WhatsApp bridge logs
+    cshive stop vps             # stop VPS stack only (e.g. before manual maintenance)
+    cshive backup               # cold backup VPS RocksDB to /zfs/Backup/hive/collab/
+    cshive update primary       # pull new bridge images and restart
+EOF
+}
+
+_load_vars() {
+    load_env
+    COLIMA_PROFILE="${COLIMA_PROFILE:-default}"
+    CONTINUWUITY_PORT="${CONTINUWUITY_PORT:-6167}"
+    COLLAB_BACKUP_ROOT="${COLLAB_BACKUP_ROOT:-/zfs/Backup/hive/collab}"
+    COLLAB_VPS_CONFIG_ROOT="${COLLAB_VPS_CONFIG_ROOT:-/opt/collab}"
+}
+
+# ── Compose helpers ───────────────────────────────────────────────────────────
+
+_compose_primary() {
+    export_docker_host
+    require_docker
+    docker compose -f "${PROJECT_ROOT}/docker-compose.yml" "$@"
+}
+
+_compose_vps() {
+    require_env COLLAB_VPS_SSH_HOST
+    local key_opt=""
+    if [[ -n "${COLLAB_VPS_SSH_KEY:-}" ]]; then
+        key_opt="-o IdentityFile=${COLLAB_VPS_SSH_KEY/#\~/${HOME}}"
+        export GIT_SSH_COMMAND="ssh ${key_opt}"
+    fi
+    DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" \
+        docker compose -f "${PROJECT_ROOT}/docker-compose.vps.yml" "$@"
+}
+
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+run_start() {
+    local target="${1:-all}"
+    case "${target}" in
+        vps)
+            log_step "Starting VPS stack (Continuwuity + Caddy + wsproxy)"
+            _compose_vps up -d
+            log_ok "VPS stack started"
+            ;;
+        primary)
+            log_step "Starting primary stack (bridges)"
+            docker network create hive-net 2>/dev/null || true
+            _compose_primary up -d
+            log_ok "Primary stack started"
+            ;;
+        all)
+            run_start vps
+            run_start primary
+            ;;
+        *)
+            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            exit 1
+            ;;
+    esac
+}
+
+run_stop() {
+    local target="${1:-all}"
+    case "${target}" in
+        vps)
+            log_step "Stopping VPS stack"
+            _compose_vps down
+            log_ok "VPS stack stopped"
+            ;;
+        primary)
+            log_step "Stopping primary stack"
+            _compose_primary down
+            log_ok "Primary stack stopped"
+            ;;
+        all)
+            run_stop primary
+            run_stop vps
+            ;;
+        *)
+            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            exit 1
+            ;;
+    esac
+}
+
+run_restart() {
+    local target="${1:-all}"
+    run_stop "${target}"
+    run_start "${target}"
+}
+
+run_status() {
+    local target="${1:-all}"
+    case "${target}" in
+        vps)
+            log_step "VPS stack status"
+            _compose_vps ps
+            ;;
+        primary)
+            log_step "Primary stack status"
+            _compose_primary ps
+            ;;
+        all)
+            run_status vps
+            echo ""
+            run_status primary
+            ;;
+        *)
+            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            exit 1
+            ;;
+    esac
+}
+
+run_update() {
+    local target="${1:-all}"
+    case "${target}" in
+        vps)
+            log_step "Updating VPS stack images"
+            _compose_vps pull
+            _compose_vps up -d
+            log_ok "VPS stack updated"
+            ;;
+        primary)
+            log_step "Updating primary stack images"
+            _compose_primary pull
+            _compose_primary up -d
+            log_ok "Primary stack updated"
+            ;;
+        all)
+            run_update vps
+            run_update primary
+            ;;
+        *)
+            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Backup ────────────────────────────────────────────────────────────────────
+
+run_backup() {
+    require_env COLLAB_VPS_SSH_HOST COLLAB_PRIMARY_ZT_IP
+    local today; today="$(date +%Y-%m-%d)"
+    local dest="${COLLAB_BACKUP_ROOT}/${today}"
+    local latest="${COLLAB_BACKUP_ROOT}/latest"
+
+    log_step "Starting cold backup of VPS RocksDB → ${dest}"
+    log_warn "VPS services will be stopped briefly (~30–60s)"
+
+    log_step "1/4 Stopping VPS stack"
+    _compose_vps down
+
+    log_step "2/4 Resolving volume path on VPS"
+    local vol_path
+    vol_path="$(DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" \
+        docker volume inspect collab-vps_collab_continuwuity_data \
+        --format '{{.Mountpoint}}' 2>/dev/null)" || {
+        log_warn "Volume not found — homeserver may not have been started yet"
+        vol_path=""
+    }
+
+    if [[ -n "${vol_path}" ]]; then
+        log_step "3/4 Rsyncing ${COLLAB_VPS_SSH_HOST}:${vol_path}/ → ${dest}/"
+        mkdir -p "${dest}"
+        local link_arg=""
+        [[ -d "${latest}" ]] && link_arg="--link-dest=${latest}"
+        rsync -az --delete ${link_arg} \
+            "${COLLAB_VPS_SSH_HOST}:${vol_path}/" \
+            "${dest}/"
+        ln -sfn "${dest}" "${latest}"
+        log_ok "Backup complete: ${dest}"
+    else
+        log_warn "Skipping rsync — no volume data found (nothing to back up yet)"
+    fi
+
+    log_step "4/4 Restarting VPS stack"
+    _compose_vps up -d
+    log_ok "VPS stack restarted"
+
+    log_step "Rotating old backups (keeping last 30 days)"
+    _rotate_backups
+}
+
+_rotate_backups() {
+    local cutoff; cutoff="$(date -v-31d +%Y-%m-%d 2>/dev/null || date -d '31 days ago' +%Y-%m-%d)"
+    local count=0
+    for dir in "${COLLAB_BACKUP_ROOT}"/????-??-??; do
+        [[ -d "${dir}" ]] || continue
+        local name; name="$(basename "${dir}")"
+        if [[ "${name}" < "${cutoff}" ]]; then
+            rm -rf "${dir}"
+            (( count++ ))
+        fi
+    done
+    [[ ${count} -gt 0 ]] && log_info "Removed ${count} backup(s) older than 30 days"
+}
+
+# ── Verify ────────────────────────────────────────────────────────────────────
+
+run_verify() {
+    local ok=true
+    require_env COLLAB_VPS_ZT_IP COLLAB_PRIMARY_ZT_IP COLLAB_VPS_SSH_HOST MATRIX_DOMAIN
+
+    log_step "1. ZeroTier connectivity to VPS (${COLLAB_VPS_ZT_IP})"
+    if ping -c 1 -W 2 "${COLLAB_VPS_ZT_IP}" &>/dev/null; then
+        log_ok "VPS ZeroTier reachable"
+    else
+        log_error "Cannot ping VPS at ${COLLAB_VPS_ZT_IP}"
+        log_info  "Check: is ZeroTier running? Is the VPS joined to the network?"
+        ok=false
+    fi
+
+    log_step "2. VPS SSH reachable"
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${COLLAB_VPS_SSH_HOST}" true 2>/dev/null; then
+        log_ok "VPS SSH reachable"
+    else
+        log_error "SSH to ${COLLAB_VPS_SSH_HOST} failed"
+        log_info  "Check: correct key in COLLAB_VPS_SSH_KEY? VPS SSH service running?"
+        ok=false
+    fi
+
+    log_step "3. VPS Docker daemon reachable"
+    if DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" docker info &>/dev/null 2>&1; then
+        log_ok "VPS Docker reachable"
+    else
+        log_error "Cannot reach Docker on VPS via SSH"
+        log_info  "Check: is Docker installed and running on the VPS?"
+        ok=false
+    fi
+
+    log_step "4. Homeserver health (${COLLAB_VPS_ZT_IP}:${CONTINUWUITY_PORT})"
+    local hs_url="http://${COLLAB_VPS_ZT_IP}:${CONTINUWUITY_PORT}/_matrix/client/versions"
+    if curl -sf --max-time 5 "${hs_url}" -o /dev/null; then
+        log_ok "Homeserver responding at ${hs_url}"
+    else
+        log_warn "Homeserver not responding at ${hs_url} (expected if not yet deployed)"
+    fi
+
+    log_step "5. Local Docker (Colima) reachable"
+    if colima_running "${COLIMA_PROFILE}"; then
+        log_ok "Colima (profile: ${COLIMA_PROFILE}) running"
+    else
+        log_warn "Colima not running — bridge stack cannot start"
+        log_info  "Start: colima start --profile ${COLIMA_PROFILE}"
+    fi
+
+    log_step "6. hive-net bridge exists"
+    export_docker_host
+    if docker network ls --format '{{.Name}}' 2>/dev/null | grep -q '^hive-net$'; then
+        log_ok "hive-net bridge present"
+    else
+        log_warn "hive-net not found — run: docker network create hive-net"
+        log_info  "Or: cshive start primary (creates it automatically)"
+    fi
+
+    echo ""
+    if $ok; then
+        log_ok "All required checks passed"
+    else
+        log_error "Some checks failed — resolve issues before deploying"
+        exit 1
+    fi
+}
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+
+run_logs() {
+    local service="${1:?Usage: cshive logs <service>}"
+    case "${service}" in
+        signal|whatsapp|discord)
+            _compose_primary logs -f "${service}" ;;
+        continuwuity|wsproxy|caddy)
+            _compose_vps logs -f "${service}" ;;
+        *)
+            log_error "Unknown service: ${service}"
+            log_info  "Valid: signal, whatsapp, discord, continuwuity, wsproxy, caddy"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+    [[ "${cmd}" == "help" || "${cmd}" == "--help" || "${cmd}" == "-h" ]] && { usage; exit 0; }
+    _load_vars
+    case "${cmd}" in
+        start)   run_start   "${1:-all}" ;;
+        stop)    run_stop    "${1:-all}" ;;
+        restart) run_restart "${1:-all}" ;;
+        status)  run_status  "${1:-all}" ;;
+        update)  run_update  "${1:-all}" ;;
+        backup)  run_backup ;;
+        verify)  run_verify ;;
+        logs)    run_logs "$@" ;;
+        *) log_error "Unknown command: ${cmd}"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

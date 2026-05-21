@@ -1,0 +1,32 @@
+# ── Secrets & Config ──────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.crt
+registration.yaml
+*-registration.yaml
+
+# ── IDE & Editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*.code-workspace
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+.claude/
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Logs & Temp ───────────────────────────────────────────────────────────────
+*.log
+*.tmp
+.cache/
+tmp/
+temp/
+
+# ── Config Directories (bind-mounted at runtime, not tracked) ─────────────────
+# config/ subdirs hold templates only — runtime copies live in COLLAB_CONFIG_ROOT
