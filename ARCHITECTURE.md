@@ -6,52 +6,63 @@ collab-services-hive is the real-time communication layer of the *-hive portfoli
 
 ## Deployment Topology
 
-```
-[ Primary Node — M4 Mac Mini / Colima ]
-  ├── Continuwuity (Matrix homeserver)
-  ├── mautrix-signal (bridge)
-  ├── mautrix-whatsapp (bridge)
-  ├── mautrix-discord (bridge)
-  └── mautrix-wsproxy (iMessage relay WebSocket proxy)
-          ▲
-          │ Outbound TLS (ZeroTier or internet)
-          │
-[ Satellite — macOS Node (laptop or dedicated Mac) ]
-  └── mautrix-imessage binary
-        └── Reads chat.db; connects outbound to wsproxy
+**Hybrid deployment:** homeserver and wsproxy on the Gandi VPS (static public IP); bridges on the primary node (Colima); iMessage satellite as a native macOS process on the Mac Mini.
 
-[ Cloud Node (optional future) ]
-  └── Continuwuity can be relocated to VPS; bridges may follow
-        └── ZeroTier mesh remains the transport
 ```
+[ Gandi VPS ]                              [ M4 Mac Mini / Colima ]
+  Continuwuity ←──── ZeroTier mesh ──────→  mautrix-whatsapp (appservice)
+  mautrix-wsproxy    (appservice API)        mautrix-signal   (appservice)
+  Caddy (TLS)                                mautrix-discord  (appservice)
+       ▲
+       │ outbound TLS over ZeroTier
+       │
+[ M4 Mac Mini — native macOS (main user session) ]
+  mautrix-imessage binary (user LaunchAgent)
+  └── reads ~/Library/Messages/chat.db
+```
+
+Bridges connect to the homeserver via the Matrix appservice protocol over ZeroTier. Bridge `homeserver.url` points to the VPS ZeroTier IP on port 6167. The homeserver posts appservice events back to bridge listeners on the primary node's ZeroTier IP.
 
 ## Service Ports
 
-| Service | Port | Exposure | Notes |
-|---|---|---|---|
-| Continuwuity federation | 8448 | Public via Traefik | Matrix server-to-server API |
-| Continuwuity client-server | 6167 | Internal via Traefik | Non-standard; avoids common conflicts |
-| mautrix-wsproxy | internal | hive-net only | iMessage relay WebSocket |
-| All bridges | internal | hive-net only | Registered as Matrix appservices |
+| Service | Port | Host | Exposure | Notes |
+|---|---|---|---|---|
+| Continuwuity federation | 8448 | VPS (via Caddy) | Public | Matrix server-to-server API |
+| Continuwuity client-server | 443 | VPS (via Caddy) | Public | Client API + .well-known delegation |
+| Continuwuity client-server | 6167 | VPS | ZeroTier only | Bridges and MCP server reach this directly |
+| mautrix-wsproxy | internal | VPS | ZeroTier only | iMessage relay WebSocket |
+| Bridge appservice listeners | internal | Primary (Colima) | ZeroTier only | Homeserver posts events to these |
 
 ## Network
 
-All services attach to the shared `hive-net` Docker bridge (external, created by private-network-hive). Traefik (private-network-hive) routes external Matrix traffic to Continuwuity.
+- VPS services attach to a Docker bridge on the VPS; Caddy terminates public TLS
+- Primary node bridges attach to the shared `hive-net` Docker bridge (external, created by private-network-hive)
+- ZeroTier mesh is the transport between VPS and primary node
+- `COLLAB_VPS_ZT_IP` and `COLLAB_PRIMARY_ZT_IP` are set in `.env` and templated into appservice registration YAMLs
 
 ## Storage Policy
 
 All stateful data uses **named Docker volumes** — never virtiofs bind mounts. RocksDB and bridge session state are high-churn and will corrupt on virtiofs. See queen-hive's [virtiofs DB policy](https://github.com/eejd/queen-hive/blob/main/docs/VIRTIOFS_DB_POLICY.md).
 
-| Volume | Service | Notes |
+| Volume | Host | Service | Notes |
+|---|---|---|---|
+| `collab_continuwuity_data` | VPS | Continuwuity | RocksDB homeserver state; backed up via `cshive backup` |
+| `collab_signal_data` | Primary | mautrix-signal | Signal session state |
+| `collab_whatsapp_data` | Primary | mautrix-whatsapp | WhatsApp session state |
+| `collab_discord_data` | Primary | mautrix-discord | Discord session state |
+
+## Compose Stacks
+
+| File | Target | Services |
 |---|---|---|
-| `collab_continuwuity_data` | Continuwuity | RocksDB homeserver state |
-| `collab_signal_data` | mautrix-signal | Signal session state |
-| `collab_whatsapp_data` | mautrix-whatsapp | WhatsApp session state |
-| `collab_discord_data` | mautrix-discord | Discord session state |
+| `docker-compose.vps.yml` | Gandi VPS (deployed via SSH) | Continuwuity, Caddy, mautrix-wsproxy |
+| `docker-compose.yml` | Primary node (Colima) | mautrix-{signal,whatsapp,discord} |
+
+Both stacks are managed by the `cshive` CLI.
 
 ## Homeserver Selection
 
-Continuwuity is selected for resource-constrained home lab use: ~50–100MB idle RAM, Rust implementation, RocksDB storage.
+Continuwuity is selected for resource-constrained VPS deployment: ~50–100MB idle RAM, Rust implementation, RocksDB storage.
 
 **Migration warnings:**
 - Never binary-swap database files between Continuwuity, Tuwunel, or Conduit forks — their RocksDB schemas diverge
@@ -61,8 +72,8 @@ Continuwuity is selected for resource-constrained home lab use: ~50–100MB idle
 
 | Dependency | Hive | What it provides |
 |---|---|---|
-| ZeroTier mesh + Traefik | private-network-hive | Network transport, federation routing, hive-net bridge |
-| hive-net Docker bridge | private-network-hive | Inter-service communication |
+| ZeroTier mesh | private-network-hive | Transport between VPS and primary node |
+| hive-net Docker bridge | private-network-hive | Inter-service communication on primary node |
 | MCP Matrix server | agent-services-hive (adjacent) | AI agent tooling for Matrix rooms |
 
 ## Integration Registry
