@@ -2,8 +2,10 @@
 # collab-services-hive — Primary Node Stack (M4 Mac Mini / Colima)
 # Managed by: cshive start|stop|status|update primary
 #
-# Services: mautrix-{signal,whatsapp,discord} bridges
-# Homeserver (Continuwuity) and wsproxy run on the Gandi VPS — see docker-compose.vps.yml
+# Services:
+#   (default profile)  mautrix-{signal,whatsapp,discord} bridges → sibeling.org VPS homeserver
+#   (private profile)  Continuwuity homeserver for home.zt — personal sandbox, ZeroTier-only
+#   (inviteonly profile) Continuwuity homeserver for sibeling.net — future phase
 #
 # Bridge ↔ homeserver communication:
 #   Bridge → homeserver: HTTP POST to http://${COLLAB_VPS_ZT_IP}:${CONTINUWUITY_PORT}
@@ -20,8 +22,43 @@ volumes:
   collab_signal_data:
   collab_whatsapp_data:
   collab_discord_data:
+  collab_private_data:
+    # RocksDB state for home.zt private homeserver. Named volume — never virtiofs.
 
 services:
+
+  # ── Private Homeserver (home.zt) ─────────────────────────────────────────────
+  # Started independently: cshive start private
+  # TLS: HTTP-only via Traefik for now; TLS deferred to private-network-hive Phase 4.
+  # Client config: set homeserver URL directly to http://matrix.home.zt in Element
+  #   (bypasses .well-known discovery, which requires HTTPS).
+  # WARNING: server_name is permanent — embedded in all user/room IDs. Do not change
+  #   after first start. home.zt and sibeling.net are separate, independent servers.
+  continuwuity-private:
+    image: girlbossceo/continuwuity:${CONTINUWUITY_VERSION:-latest}
+    container_name: collab-continuwuity-private
+    restart: unless-stopped
+    profiles:
+      - private
+    volumes:
+      - collab_private_data:/var/lib/continuwuity
+      - ${COLLAB_CONFIG_ROOT}/continuwuity-private:/etc/continuwuity:ro
+    networks:
+      - hive-net
+    environment:
+      CONDUWUIT_CONFIG: /etc/continuwuity/continuwuity.toml
+      CONDUWUIT_REGISTRATION_SHARED_SECRET: "${PRIVATE_REGISTRATION_SHARED_SECRET}"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${PRIVATE_CONTINUWUITY_PORT:-6168}/_matrix/client/versions"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.collab-private.rule=Host(`matrix.home.zt`)"
+      - "traefik.http.routers.collab-private.entrypoints=web"
+      - "traefik.http.services.collab-private.loadbalancer.server.port=${PRIVATE_CONTINUWUITY_PORT:-6168}"
 
   # ── Signal Bridge ────────────────────────────────────────────────────────────
   signal:

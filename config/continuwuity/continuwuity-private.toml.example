@@ -1,0 +1,40 @@
+# continuwuity-private.toml — home.zt private homeserver configuration
+# Deploy to: ${COLLAB_CONFIG_ROOT}/continuwuity-private/continuwuity.toml
+# Variables substituted from .env by: cshive private-setup
+#
+# WARNING: server_name is permanent. Every user ID and room ID embeds this value.
+# home.zt and sibeling.net are separate servers — not upgrades of each other.
+# Do not change server_name after the first start.
+
+[global]
+server_name = "${PRIVATE_SERVER_NAME}"
+database_backend = "rocksdb"
+database_path = "/var/lib/continuwuity"
+
+address = "0.0.0.0"
+port = ${PRIVATE_CONTINUWUITY_PORT}
+
+max_request_size = 20971520
+
+# No federation — this server is ZeroTier-only, never publicly reachable.
+allow_federation = false
+
+# Registration open for initial account creation.
+# Set to false after creating your account, or set a registration_token below.
+allow_registration = true
+# registration_token = "change-me-after-setup"
+
+allow_guest_registration = false
+allow_encryption = true
+allow_room_creation = true
+allow_unstable_room_versions = true
+
+log = "warn,state_res=warn"
+
+# ── Appservice Bridges (optional, for future testing) ─────────────────────────
+# Uncomment to attach a bridge to this private server for testing before
+# promoting configuration to sibeling.org.
+#
+# app_service_config_files = [
+#     "/etc/continuwuity/test-bridge-registration.yaml",
+# ]

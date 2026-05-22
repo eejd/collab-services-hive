@@ -10,13 +10,16 @@ usage() {
 cshive — collab-services-hive lifecycle manager
 
 LIFECYCLE:
-    start   [vps|primary|all]   Start services (default: all)
-    stop    [vps|primary|all]   Stop services (default: all)
-    restart [vps|primary|all]   Restart services (default: all)
-    status  [vps|primary]       Show service status (default: both)
-    update  [vps|primary|all]   Pull latest images and restart (default: all)
+    start   [vps|primary|private|all]   Start services (default: all)
+    stop    [vps|primary|private|all]   Stop services (default: all)
+    restart [vps|primary|private|all]   Restart services (default: all)
+    status  [vps|primary|private|all]   Show service status (default: all)
+    update  [vps|primary|private|all]   Pull latest images and restart (default: all)
 
-VPS SETUP (run once before first deploy):
+PRIVATE SERVER SETUP (home.zt — run once before first start):
+    private-setup               Deploy home.zt config to COLLAB_CONFIG_ROOT
+
+VPS SETUP (sibeling.org — run once before first deploy):
     vps-setup                   Create VPS directories and deploy config files
     vps-ufw                     Configure VPS firewall (UFW) for Matrix services
     vps-deploy-config           Re-deploy config files to VPS (after editing templates)
@@ -24,25 +27,28 @@ VPS SETUP (run once before first deploy):
 OPERATIONS:
     backup                      Cold backup: stop VPS → rsync RocksDB → restart VPS
     verify                      Preflight: ZeroTier, SSH, homeserver health, hive-net
-    logs <service>              Tail logs (signal|whatsapp|discord|continuwuity|wsproxy|caddy)
+    logs <service>              Tail logs (signal|whatsapp|discord|continuwuity|continuwuity-private|wsproxy|caddy)
 
-FIRST DEPLOY SEQUENCE:
+FIRST DEPLOY — private homeserver (home.zt):
     1. cp .env.example .env && \$EDITOR .env
-    2. cshive verify             # check connectivity
-    3. cshive vps-setup          # deploy config to VPS
-    4. cshive vps-ufw            # configure firewall
-    5. cshive start vps          # start homeserver
-    6. cshive verify             # confirm homeserver healthy
+    2. cshive private-setup      # deploy config files
+    3. cshive start private      # start homeserver
+    4. Configure Element: set homeserver URL to http://matrix.home.zt
+
+FIRST DEPLOY — public homeserver (sibeling.org VPS):
+    1. cshive verify             # check connectivity
+    2. cshive vps-setup          # deploy config to VPS
+    3. cshive vps-ufw            # configure firewall
+    4. cshive start vps          # start homeserver
 
 EXAMPLES:
-    cshive verify               # check prerequisites
-    cshive start                # start both stacks
+    cshive start private        # start home.zt homeserver only
+    cshive logs continuwuity-private  # tail private homeserver logs
+    cshive start                # start all stacks
     cshive status               # show all service status
-    cshive logs continuwuity    # tail homeserver logs
-    cshive stop vps             # stop VPS stack only
     cshive backup               # cold backup VPS RocksDB to /zfs/Backup/hive/collab/
     cshive update primary       # pull new bridge images and restart
-    cshive vps-deploy-config    # push updated continuwuity.toml or Caddyfile to VPS
+    cshive vps-deploy-config    # push updated Caddyfile/continuwuity.toml to VPS
 EOF
 }
 
@@ -50,6 +56,8 @@ _load_vars() {
     load_env
     COLIMA_PROFILE="${COLIMA_PROFILE:-default}"
     CONTINUWUITY_PORT="${CONTINUWUITY_PORT:-6167}"
+    PRIVATE_CONTINUWUITY_PORT="${PRIVATE_CONTINUWUITY_PORT:-6168}"
+    PRIVATE_SERVER_NAME="${PRIVATE_SERVER_NAME:-home.zt}"
     COLLAB_BACKUP_ROOT="${COLLAB_BACKUP_ROOT:-/zfs/Backup/hive/collab}"
     COLLAB_VPS_CONFIG_ROOT="${COLLAB_VPS_CONFIG_ROOT:-/opt/collab}"
 }
@@ -83,6 +91,12 @@ _compose_primary() {
     docker compose -f "${PROJECT_ROOT}/docker-compose.yml" "$@"
 }
 
+_compose_private() {
+    export_docker_host
+    require_docker
+    docker compose -f "${PROJECT_ROOT}/docker-compose.yml" --profile private "$@"
+}
+
 _compose_vps() {
     require_env COLLAB_VPS_SSH_HOST
     local key_opt=""
@@ -110,12 +124,20 @@ run_start() {
             _compose_primary up -d
             log_ok "Primary stack started"
             ;;
+        private)
+            log_step "Starting private homeserver (${PRIVATE_SERVER_NAME})"
+            docker network create hive-net 2>/dev/null || true
+            _compose_private up -d continuwuity-private
+            log_ok "Private homeserver started"
+            log_info "Connect Element: set homeserver URL to http://matrix.${PRIVATE_SERVER_NAME}"
+            ;;
         all)
             run_start vps
             run_start primary
+            run_start private
             ;;
         *)
-            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            log_error "Unknown target: ${target}. Use: vps, primary, private, or all"
             exit 1
             ;;
     esac
@@ -134,12 +156,18 @@ run_stop() {
             _compose_primary down
             log_ok "Primary stack stopped"
             ;;
+        private)
+            log_step "Stopping private homeserver"
+            _compose_private stop continuwuity-private
+            log_ok "Private homeserver stopped"
+            ;;
         all)
+            run_stop private
             run_stop primary
             run_stop vps
             ;;
         *)
-            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            log_error "Unknown target: ${target}. Use: vps, primary, private, or all"
             exit 1
             ;;
     esac
@@ -162,13 +190,19 @@ run_status() {
             log_step "Primary stack status"
             _compose_primary ps
             ;;
+        private)
+            log_step "Private homeserver status"
+            _compose_private ps continuwuity-private
+            ;;
         all)
             run_status vps
             echo ""
             run_status primary
+            echo ""
+            run_status private
             ;;
         *)
-            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            log_error "Unknown target: ${target}. Use: vps, primary, private, or all"
             exit 1
             ;;
     esac
@@ -189,15 +223,50 @@ run_update() {
             _compose_primary up -d
             log_ok "Primary stack updated"
             ;;
+        private)
+            log_step "Updating private homeserver image"
+            _compose_private pull continuwuity-private
+            _compose_private up -d continuwuity-private
+            log_ok "Private homeserver updated"
+            ;;
         all)
             run_update vps
             run_update primary
+            run_update private
             ;;
         *)
-            log_error "Unknown target: ${target}. Use: vps, primary, or all"
+            log_error "Unknown target: ${target}. Use: vps, primary, private, or all"
             exit 1
             ;;
     esac
+}
+
+# ── Private Server Setup (home.zt) ───────────────────────────────────────────
+
+run_private_setup() {
+    require_env COLLAB_CONFIG_ROOT PRIVATE_SERVER_NAME PRIVATE_CONTINUWUITY_PORT
+
+    local config_dir="${COLLAB_CONFIG_ROOT}/continuwuity-private"
+    local toml_tpl="${PROJECT_ROOT}/config/continuwuity/continuwuity-private.toml.example"
+
+    log_step "1/2 Creating config directory: ${config_dir}"
+    mkdir -p "${config_dir}"
+    log_ok "Directory ready"
+
+    log_step "2/2 Deploying continuwuity.toml for ${PRIVATE_SERVER_NAME}"
+    if [[ ! -f "${toml_tpl}" ]]; then
+        log_error "Template not found: ${toml_tpl}"
+        exit 1
+    fi
+    envsubst < "${toml_tpl}" > "${config_dir}/continuwuity.toml"
+    log_ok "Config deployed to ${config_dir}/continuwuity.toml"
+    log_warn "server_name is set to '${PRIVATE_SERVER_NAME}' — permanent after first start"
+
+    log_ok "Private server setup complete"
+    log_info "Next: cshive start private"
+    log_info "Then: configure Element homeserver URL → http://matrix.${PRIVATE_SERVER_NAME}"
+    log_info "After creating your account, set allow_registration = false in the config"
+    log_info "and run: cshive restart private"
 }
 
 # ── VPS Setup ────────────────────────────────────────────────────────────────
@@ -413,11 +482,13 @@ run_logs() {
     case "${service}" in
         signal|whatsapp|discord)
             _compose_primary logs -f "${service}" ;;
+        continuwuity-private)
+            _compose_private logs -f continuwuity-private ;;
         continuwuity|wsproxy|caddy)
             _compose_vps logs -f "${service}" ;;
         *)
             log_error "Unknown service: ${service}"
-            log_info  "Valid: signal, whatsapp, discord, continuwuity, wsproxy, caddy"
+            log_info  "Valid: signal, whatsapp, discord, continuwuity, continuwuity-private, wsproxy, caddy"
             exit 1
             ;;
     esac
@@ -436,6 +507,7 @@ main() {
         restart) run_restart "${1:-all}" ;;
         status)  run_status  "${1:-all}" ;;
         update)  run_update  "${1:-all}" ;;
+        private-setup)      run_private_setup ;;
         vps-setup)          run_vps_setup ;;
         vps-ufw)            run_vps_ufw ;;
         vps-deploy-config)  run_vps_deploy_config ;;

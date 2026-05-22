@@ -48,13 +48,25 @@ Read in this order:
 
 collab-services-hive issues link to the `hive-portfolio` project (#5) in the `eejd` org for cross-repo coordination. Per-repo board: TBD (seed after Phase 0 bootstrap is complete).
 
+## Three-Server Model
+
+All three servers are independent and permanent — Matrix server names are embedded in user/room IDs forever.
+
+| Server | Domain | Host | Federation | Purpose |
+|---|---|---|---|---|
+| Private | `home.zt` | Primary node (Colima) | No | Personal sandbox; ZeroTier-only; AI/MCP experimentation |
+| Invite-only | `sibeling.net` | Primary node (Colima) | No | Trusted users; staging before sibeling.org changes |
+| Public | `sibeling.org` | Gandi VPS | Yes | Federated; bridges; production communication platform |
+
 ## Phase Status
 
 | Phase | Focus | Status |
 |---|---|---|
 | 0 | Bootstrap (docs, repo, compose skeleton, cshive CLI) | ✅ Complete |
-| 1 | Continuwuity homeserver on VPS + Caddy TLS | 🔄 Scaffold done — needs .env + operational deploy |
-| 2 | Core bridges (WhatsApp, Signal, Discord) | 🔲 Not started |
+| 1a | Private homeserver (home.zt) on primary node | 🔄 Scaffold done — needs .env + `cshive private-setup` |
+| 1b | Public homeserver (sibeling.org) on VPS + Caddy TLS | 🔄 Scaffold done — needs .env + operational deploy |
+| 2 | Core bridges (WhatsApp, Signal, Discord) → sibeling.org | 🔲 Not started |
 | 3 | iMessage relay (wsproxy + macOS satellite) | 🔲 Not started |
+| 3.5 | Invite-only homeserver (sibeling.net) on primary node | 🔲 Not started |
 | 4 | AI agent integration (MCP Matrix server) | 🔲 Not started |
 | 5 | Future: S3 media offload, MAS/OIDC, LiveKit | 🔲 Not started |
