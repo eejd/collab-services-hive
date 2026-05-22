@@ -16,19 +16,33 @@ LIFECYCLE:
     status  [vps|primary]       Show service status (default: both)
     update  [vps|primary|all]   Pull latest images and restart (default: all)
 
+VPS SETUP (run once before first deploy):
+    vps-setup                   Create VPS directories and deploy config files
+    vps-ufw                     Configure VPS firewall (UFW) for Matrix services
+    vps-deploy-config           Re-deploy config files to VPS (after editing templates)
+
 OPERATIONS:
     backup                      Cold backup: stop VPS → rsync RocksDB → restart VPS
-    verify                      Preflight: ZeroTier, SSH, homeserver health, bridge ports
-    logs <service>              Tail logs for a service (signal|whatsapp|discord|continuwuity|wsproxy|caddy)
+    verify                      Preflight: ZeroTier, SSH, homeserver health, hive-net
+    logs <service>              Tail logs (signal|whatsapp|discord|continuwuity|wsproxy|caddy)
+
+FIRST DEPLOY SEQUENCE:
+    1. cp .env.example .env && \$EDITOR .env
+    2. cshive verify             # check connectivity
+    3. cshive vps-setup          # deploy config to VPS
+    4. cshive vps-ufw            # configure firewall
+    5. cshive start vps          # start homeserver
+    6. cshive verify             # confirm homeserver healthy
 
 EXAMPLES:
-    cshive verify               # check prerequisites before first deploy
+    cshive verify               # check prerequisites
     cshive start                # start both stacks
     cshive status               # show all service status
-    cshive logs whatsapp        # tail WhatsApp bridge logs
-    cshive stop vps             # stop VPS stack only (e.g. before manual maintenance)
+    cshive logs continuwuity    # tail homeserver logs
+    cshive stop vps             # stop VPS stack only
     cshive backup               # cold backup VPS RocksDB to /zfs/Backup/hive/collab/
     cshive update primary       # pull new bridge images and restart
+    cshive vps-deploy-config    # push updated continuwuity.toml or Caddyfile to VPS
 EOF
 }
 
@@ -38,6 +52,27 @@ _load_vars() {
     CONTINUWUITY_PORT="${CONTINUWUITY_PORT:-6167}"
     COLLAB_BACKUP_ROOT="${COLLAB_BACKUP_ROOT:-/zfs/Backup/hive/collab}"
     COLLAB_VPS_CONFIG_ROOT="${COLLAB_VPS_CONFIG_ROOT:-/opt/collab}"
+}
+
+# ── SSH / SCP helpers ─────────────────────────────────────────────────────────
+
+_ssh_vps() {
+    local key_path="${COLLAB_VPS_SSH_KEY:-}"
+    if [[ -n "${key_path}" ]]; then
+        ssh -i "${key_path/#\~/${HOME}}" "${COLLAB_VPS_SSH_HOST}" "$@"
+    else
+        ssh "${COLLAB_VPS_SSH_HOST}" "$@"
+    fi
+}
+
+_scp_to_vps() {
+    local src="$1" dest="$2"
+    local key_path="${COLLAB_VPS_SSH_KEY:-}"
+    if [[ -n "${key_path}" ]]; then
+        scp -i "${key_path/#\~/${HOME}}" "${src}" "${COLLAB_VPS_SSH_HOST}:${dest}"
+    else
+        scp "${src}" "${COLLAB_VPS_SSH_HOST}:${dest}"
+    fi
 }
 
 # ── Compose helpers ───────────────────────────────────────────────────────────
@@ -163,6 +198,86 @@ run_update() {
             exit 1
             ;;
     esac
+}
+
+# ── VPS Setup ────────────────────────────────────────────────────────────────
+
+run_vps_setup() {
+    require_env COLLAB_VPS_SSH_HOST COLLAB_VPS_CONFIG_ROOT \
+                MATRIX_SERVER_NAME MATRIX_DOMAIN CONTINUWUITY_PORT ACME_EMAIL
+
+    log_step "1/4 Creating VPS directory structure at ${COLLAB_VPS_CONFIG_ROOT}"
+    _ssh_vps "mkdir -p ${COLLAB_VPS_CONFIG_ROOT}/{continuwuity,caddy,wsproxy}"
+    log_ok "Directories created"
+
+    log_step "2/4 Deploying Caddyfile"
+    _scp_to_vps \
+        "${PROJECT_ROOT}/config/caddy/Caddyfile.example" \
+        "${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile"
+    log_ok "Caddyfile deployed (Caddy resolves {\$VAR} env vars at runtime)"
+
+    log_step "3/4 Deploying continuwuity.toml"
+    local toml_tpl="${PROJECT_ROOT}/config/continuwuity/continuwuity.toml.example"
+    if [[ ! -f "${toml_tpl}" ]]; then
+        log_error "Template not found: ${toml_tpl}"
+        exit 1
+    fi
+    envsubst < "${toml_tpl}" | \
+        _ssh_vps "cat > ${COLLAB_VPS_CONFIG_ROOT}/continuwuity/continuwuity.toml"
+    log_ok "continuwuity.toml deployed (MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME})"
+
+    log_step "4/4 Verifying Docker on VPS"
+    if _ssh_vps "docker --version" 2>/dev/null; then
+        log_ok "Docker available on VPS"
+    else
+        log_error "Docker not found on VPS"
+        log_info  "Install: curl -fsSL https://get.docker.com | sh"
+        exit 1
+    fi
+
+    log_ok "VPS setup complete"
+    log_info "Next steps:"
+    log_info "  cshive vps-ufw    — configure UFW firewall rules"
+    log_info "  cshive start vps  — deploy and start the homeserver"
+}
+
+run_vps_ufw() {
+    require_env COLLAB_VPS_SSH_HOST ZT_SUBNET CONTINUWUITY_PORT
+
+    log_step "Configuring UFW on VPS (ZeroTier subnet: ${ZT_SUBNET})"
+
+    # Public ports — Matrix federation and client API via Caddy
+    _ssh_vps "sudo ufw allow 80/tcp comment 'Caddy ACME HTTP-01'"
+    _ssh_vps "sudo ufw allow 443/tcp comment 'Matrix client-server API'"
+    _ssh_vps "sudo ufw allow 8448/tcp comment 'Matrix server-to-server federation'"
+
+    # ZeroTier-only — homeserver API for bridges and MCP server on primary node
+    _ssh_vps "sudo ufw allow from ${ZT_SUBNET} to any port ${CONTINUWUITY_PORT} proto tcp comment 'Matrix homeserver API (ZeroTier only)'"
+
+    # ZeroTier-only — wsproxy for iMessage satellite (Mac Mini)
+    _ssh_vps "sudo ufw allow from ${ZT_SUBNET} to any port 29331 proto tcp comment 'mautrix-wsproxy (ZeroTier only)'"
+
+    log_ok "UFW rules applied"
+    _ssh_vps "sudo ufw status numbered"
+}
+
+run_vps_deploy_config() {
+    require_env COLLAB_VPS_SSH_HOST COLLAB_VPS_CONFIG_ROOT \
+                MATRIX_SERVER_NAME MATRIX_DOMAIN CONTINUWUITY_PORT ACME_EMAIL
+
+    log_step "Re-deploying config files to VPS"
+
+    log_info "Deploying Caddyfile"
+    _scp_to_vps \
+        "${PROJECT_ROOT}/config/caddy/Caddyfile.example" \
+        "${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile"
+
+    log_info "Deploying continuwuity.toml"
+    envsubst < "${PROJECT_ROOT}/config/continuwuity/continuwuity.toml.example" | \
+        _ssh_vps "cat > ${COLLAB_VPS_CONFIG_ROOT}/continuwuity/continuwuity.toml"
+
+    log_ok "Config files deployed"
+    log_info "Restart the VPS stack to apply: cshive restart vps"
 }
 
 # ── Backup ────────────────────────────────────────────────────────────────────
@@ -321,6 +436,9 @@ main() {
         restart) run_restart "${1:-all}" ;;
         status)  run_status  "${1:-all}" ;;
         update)  run_update  "${1:-all}" ;;
+        vps-setup)          run_vps_setup ;;
+        vps-ufw)            run_vps_ufw ;;
+        vps-deploy-config)  run_vps_deploy_config ;;
         backup)  run_backup ;;
         verify)  run_verify ;;
         logs)    run_logs "$@" ;;

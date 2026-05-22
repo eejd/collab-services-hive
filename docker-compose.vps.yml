@@ -6,11 +6,10 @@
 # Services: Continuwuity (homeserver) + Caddy (TLS) + mautrix-wsproxy (iMessage relay)
 # Bridges run on the primary node — see docker-compose.yml
 #
-# VPS prerequisites:
-#   - Docker installed and running
-#   - UFW: allow 80, 443, 8448/tcp (public); allow <SIGNAL/WHATSAPP/DISCORD_APPSERVICE_PORT> from ZT only
-#   - COLLAB_VPS_CONFIG_ROOT (/opt/collab by default) exists and contains config files
-#   - DNS: matrix.${MATRIX_DOMAIN} A record → VPS public IP
+# VPS prerequisites (run once):
+#   cshive vps-setup   — creates directories, deploys config files
+#   cshive vps-ufw     — configures UFW: ports 80/443/8448 public; 6167/29331 ZT-only
+#   DNS: matrix.${MATRIX_DOMAIN} A record → VPS public IP (static)
 
 name: collab-vps
 
@@ -20,10 +19,10 @@ networks:
 
 volumes:
   collab_continuwuity_data:
-    # RocksDB homeserver state. Backed up by: cshive backup (cold rsync to /zfs/Backup/hive/collab/).
-    # Never use virtiofs or a bind mount here — RocksDB requires a proper block device.
+    # RocksDB homeserver state. Never use a virtiofs or bind mount — RocksDB
+    # requires a real block device. Backed up by: cshive backup
   collab_caddy_data:
-    # Caddy certificate storage (ACME state). Persisted across restarts.
+    # Caddy ACME certificate storage. Persisted so certs survive container restarts.
   collab_caddy_config:
     # Caddy runtime config cache.
 
@@ -36,27 +35,28 @@ services:
     restart: unless-stopped
     volumes:
       - collab_continuwuity_data:/var/lib/continuwuity
+      # Config bind mount — deployed by: cshive vps-setup
+      # Contains continuwuity.toml and (Phase 2) bridge registration YAMLs.
       - ${COLLAB_VPS_CONFIG_ROOT}/continuwuity:/etc/continuwuity:ro
     networks:
       - collab-vps-net
-    expose:
-      # Client-server API — accessed by Caddy (proxy) and directly from ZT by bridges/MCP.
-      - "${CONTINUWUITY_PORT:-6167}"
     ports:
-      # Direct ZeroTier access for bridges and MCP server on primary node.
-      # NOT exposed publicly — Caddy handles the public-facing port 443.
-      - "127.0.0.1:${CONTINUWUITY_PORT:-6167}:${CONTINUWUITY_PORT:-6167}"
+      # Published to 0.0.0.0 so the VPS's ZeroTier interface can forward bridge
+      # and MCP server requests. UFW (configured by cshive vps-ufw) restricts
+      # this port to ZT_SUBNET — it is NOT exposed publicly.
+      - "${CONTINUWUITY_PORT:-6167}:${CONTINUWUITY_PORT:-6167}"
     environment:
-      CONTINUWUITY_SERVER_NAME: "${MATRIX_SERVER_NAME}"
-      CONTINUWUITY_PORT: "${CONTINUWUITY_PORT:-6167}"
-      CONTINUWUITY_REGISTRATION_SHARED_SECRET: "${CONTINUWUITY_REGISTRATION_SHARED_SECRET}"
-      CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity
-      CONTINUWUITY_LOG: warn
+      # Point Continuwuity to the config file in the bind mount.
+      CONDUWUIT_CONFIG: /etc/continuwuity/continuwuity.toml
+      # Registration shared secret — kept as env var, not in the config file.
+      # conduwuit env var prefix is CONDUWUIT_; override with CONTINUWUITY_ if needed.
+      CONDUWUIT_REGISTRATION_SHARED_SECRET: "${CONTINUWUITY_REGISTRATION_SHARED_SECRET}"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${CONTINUWUITY_PORT:-6167}/_matrix/client/versions"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s
 
   # ── mautrix-wsproxy (iMessage relay) ─────────────────────────────────────────
   wsproxy:
@@ -65,12 +65,10 @@ services:
     restart: unless-stopped
     networks:
       - collab-vps-net
-    expose:
-      # iMessage relay WebSocket — accessible to macOS satellite over ZeroTier.
-      - "29331"
     ports:
-      # Bound to 0.0.0.0 so the ZT interface on the VPS can forward iMessage traffic
-      # from the Mac Mini satellite (mautrix-imessage outbound TLS connection).
+      # iMessage relay WebSocket. Bound to 0.0.0.0 so the VPS's ZT interface
+      # can accept the outbound connection from mautrix-imessage on the Mac Mini.
+      # UFW restricts this to ZT_SUBNET.
       - "29331:29331"
     environment:
       LISTEN_ADDRESS: "0.0.0.0:29331"
@@ -85,14 +83,16 @@ services:
     networks:
       - collab-vps-net
     ports:
-      - "80:80"     # ACME HTTP-01 challenge
+      - "80:80"     # ACME HTTP-01 challenge (must be public)
       - "443:443"   # Matrix client-server API + .well-known delegation
       - "8448:8448" # Matrix server-to-server federation
     volumes:
+      # Caddyfile deployed by: cshive vps-setup (copied as-is; Caddy reads {$VAR} at runtime)
       - ${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - collab_caddy_data:/data
       - collab_caddy_config:/config
     environment:
+      # Caddy resolves {$VAR} syntax in the Caddyfile from these env vars.
       MATRIX_DOMAIN: "${MATRIX_DOMAIN}"
       MATRIX_SERVER_NAME: "${MATRIX_SERVER_NAME}"
       ACME_EMAIL: "${ACME_EMAIL}"
