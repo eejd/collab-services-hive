@@ -45,23 +45,17 @@ services:
       - ${COLLAB_CONFIG_ROOT}/continuwuity-private:/etc/continuwuity:ro
     networks:
       - hive-net
-    ports:
-      # Published directly to Colima VM (accessible from Mac at 192.168.64.2:6168).
-      # Traefik routing skipped: VZ-driver Colima socket forwarding prevents Traefik
-      # from discovering containers started via the Mac-side colima context socket.
-      # Connect Element to: http://192.168.64.2:6168 or http://localhost:6168
-      - "${PRIVATE_CONTINUWUITY_PORT:-6168}:${PRIVATE_CONTINUWUITY_PORT:-6168}"
     environment:
       CONDUWUIT_CONFIG: /etc/continuwuity/continuwuity.toml
       CONDUWUIT_REGISTRATION_SHARED_SECRET: "${PRIVATE_REGISTRATION_SHARED_SECRET}"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${PRIVATE_CONTINUWUITY_PORT:-6168}/_matrix/client/versions"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      # Continuwuity image is distroless — no curl/shell available for CMD healthchecks.
+      disable: true
     labels:
-      - "traefik.enable=false"
+      - "traefik.enable=true"
+      - "traefik.http.routers.collab-private.rule=Host(`matrix.home.zt`)"
+      - "traefik.http.routers.collab-private.entrypoints=web"
+      - "traefik.http.services.collab-private.loadbalancer.server.port=${PRIVATE_CONTINUWUITY_PORT:-6168}"
 
   # ── Signal Bridge ────────────────────────────────────────────────────────────
   signal:

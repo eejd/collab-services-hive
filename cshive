@@ -158,7 +158,7 @@ run_stop() {
             ;;
         private)
             log_step "Stopping private homeserver"
-            _compose_private stop continuwuity-private
+            _compose_private down --remove-orphans
             log_ok "Private homeserver stopped"
             ;;
         all)
