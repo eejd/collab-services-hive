@@ -53,7 +53,7 @@ collab-services-hive issues link to the `hive-portfolio` project (#5) in the `ee
 | Phase | Focus | Status |
 |---|---|---|
 | 0 | Bootstrap (docs, repo, compose skeleton, cshive CLI) | ✅ Complete |
-| 1 | Continuwuity homeserver on VPS + Caddy TLS | 🔲 Not started |
+| 1 | Continuwuity homeserver on VPS + Caddy TLS | 🔄 Scaffold done — needs .env + operational deploy |
 | 2 | Core bridges (WhatsApp, Signal, Discord) | 🔲 Not started |
 | 3 | iMessage relay (wsproxy + macOS satellite) | 🔲 Not started |
 | 4 | AI agent integration (MCP Matrix server) | 🔲 Not started |
