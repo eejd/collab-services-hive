@@ -19,10 +19,13 @@ load_env() {
         log_info  "Copy .env.example to .env and fill in your values."
         exit 1
     fi
+    # set -a exports all variables so child processes (envsubst, etc.) see them
+    set -a
     set +u
     # shellcheck disable=SC1090
     source "$env_file"
     set -u
+    set +a
 }
 
 require_env() {
