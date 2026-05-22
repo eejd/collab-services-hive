@@ -35,7 +35,7 @@ services:
   # WARNING: server_name is permanent — embedded in all user/room IDs. Do not change
   #   after first start. home.zt and sibeling.net are separate, independent servers.
   continuwuity-private:
-    image: girlbossceo/continuwuity:${CONTINUWUITY_VERSION:-latest}
+    image: forgejo.ellis.link/continuwuation/continuwuity:${CONTINUWUITY_VERSION:-latest}
     container_name: collab-continuwuity-private
     restart: unless-stopped
     profiles:

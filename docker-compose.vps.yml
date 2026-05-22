@@ -30,7 +30,7 @@ services:
 
   # ── Continuwuity (Matrix homeserver) ────────────────────────────────────────
   continuwuity:
-    image: girlbossceo/continuwuity:${CONTINUWUITY_VERSION:-latest}
+    image: forgejo.ellis.link/continuwuation/continuwuity:${CONTINUWUITY_VERSION:-latest}
     container_name: collab-continuwuity
     restart: unless-stopped
     volumes:
