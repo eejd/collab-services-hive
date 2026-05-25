@@ -97,15 +97,32 @@ _compose_private() {
     docker compose -f "${PROJECT_ROOT}/docker-compose.yml" --profile private "$@"
 }
 
-_compose_vps() {
-    require_env COLLAB_VPS_SSH_HOST
-    local key_opt=""
-    if [[ -n "${COLLAB_VPS_SSH_KEY:-}" ]]; then
-        key_opt="-o IdentityFile=${COLLAB_VPS_SSH_KEY/#\~/${HOME}}"
-        export GIT_SSH_COMMAND="ssh ${key_opt}"
+# Deploy wsproxy environment file to VPS (/etc/wsproxy/wsproxy.env).
+_vps_deploy_wsproxy_env() {
+    require_env WSPROXY_AS_TOKEN WSPROXY_HS_TOKEN
+    printf 'LISTEN_ADDRESS=0.0.0.0:29331\nAS_TOKEN=%s\nHS_TOKEN=%s\n' \
+        "${WSPROXY_AS_TOKEN}" "${WSPROXY_HS_TOKEN}" \
+        | _ssh_vps "sudo tee /etc/wsproxy/wsproxy.env > /dev/null"
+    _ssh_vps "sudo chmod 600 /etc/wsproxy/wsproxy.env"
+}
+
+# Update wsproxy binary to WSPROXY_VERSION on the VPS.
+_vps_update_wsproxy() {
+    local version="${WSPROXY_VERSION:-}"
+    if [[ -z "${version}" ]]; then
+        log_warn "WSPROXY_VERSION not set in .env — skipping wsproxy binary update"
+        return
     fi
-    DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" \
-        docker compose -f "${PROJECT_ROOT}/docker-compose.vps.yml" "$@"
+    local arch; arch="$(_ssh_vps "uname -m")"
+    local deb_arch
+    case "${arch}" in
+        x86_64)  deb_arch="amd64" ;;
+        aarch64) deb_arch="arm64" ;;
+        *) log_error "Unsupported VPS arch: ${arch}"; return 1 ;;
+    esac
+    local url="https://github.com/mautrix/wsproxy/releases/download/v${version}/wsproxy-linux-${deb_arch}"
+    log_info "Downloading wsproxy ${version} (${deb_arch})"
+    _ssh_vps "sudo curl -fsSL '${url}' -o /usr/local/bin/wsproxy && sudo chmod +x /usr/local/bin/wsproxy"
 }
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -115,7 +132,8 @@ run_start() {
     case "${target}" in
         vps)
             log_step "Starting VPS stack (Continuwuity + Caddy + wsproxy)"
-            _compose_vps up -d
+            require_env COLLAB_VPS_SSH_HOST
+            _ssh_vps "sudo systemctl start continuwuity caddy wsproxy"
             log_ok "VPS stack started"
             ;;
         primary)
@@ -148,7 +166,8 @@ run_stop() {
     case "${target}" in
         vps)
             log_step "Stopping VPS stack"
-            _compose_vps down
+            require_env COLLAB_VPS_SSH_HOST
+            _ssh_vps "sudo systemctl stop wsproxy caddy continuwuity"
             log_ok "VPS stack stopped"
             ;;
         primary)
@@ -187,8 +206,8 @@ run_status() {
             if [[ -z "${COLLAB_VPS_SSH_HOST:-}" ]]; then
                 log_warn "COLLAB_VPS_SSH_HOST not set — skipping VPS status (set in .env to enable)"
             else
-                _compose_vps ps 2>/dev/null || \
-                    log_warn "VPS unreachable at ${COLLAB_VPS_SSH_HOST} — SSH or Docker not available (run: cshive vps-setup)"
+                _ssh_vps "sudo systemctl status continuwuity caddy wsproxy" 2>/dev/null || \
+                    log_warn "VPS unreachable at ${COLLAB_VPS_SSH_HOST} — is SSH accessible? (run: cshive vps-setup)"
             fi
             ;;
         primary)
@@ -217,10 +236,12 @@ run_update() {
     local target="${1:-all}"
     case "${target}" in
         vps)
-            log_step "Updating VPS stack images"
-            _compose_vps pull
-            _compose_vps up -d
-            log_ok "VPS stack updated"
+            log_step "Updating VPS services"
+            require_env COLLAB_VPS_SSH_HOST
+            _ssh_vps "sudo apt-get install -y --only-upgrade continuwuity caddy"
+            _vps_update_wsproxy
+            _ssh_vps "sudo systemctl restart continuwuity caddy wsproxy"
+            log_ok "VPS stack updated and restarted"
             ;;
         primary)
             log_step "Updating primary stack images"
@@ -277,42 +298,40 @@ run_private_setup() {
 # ── VPS Setup ────────────────────────────────────────────────────────────────
 
 run_vps_setup() {
-    require_env COLLAB_VPS_SSH_HOST COLLAB_VPS_CONFIG_ROOT \
-                MATRIX_SERVER_NAME MATRIX_DOMAIN CONTINUWUITY_PORT ACME_EMAIL
+    require_env COLLAB_VPS_SSH_HOST MATRIX_SERVER_NAME MATRIX_DOMAIN \
+                CONTINUWUITY_PORT CONTINUWUITY_REGISTRATION_SHARED_SECRET \
+                ACME_EMAIL WSPROXY_AS_TOKEN WSPROXY_HS_TOKEN
 
-    log_step "1/4 Creating VPS directory structure at ${COLLAB_VPS_CONFIG_ROOT}"
-    _ssh_vps "mkdir -p ${COLLAB_VPS_CONFIG_ROOT}/{continuwuity,caddy,wsproxy}"
-    log_ok "Directories created"
-
-    log_step "2/4 Deploying Caddyfile"
-    _scp_to_vps \
-        "${PROJECT_ROOT}/config/caddy/Caddyfile.example" \
-        "${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile"
-    log_ok "Caddyfile deployed (Caddy resolves {\$VAR} env vars at runtime)"
-
-    log_step "3/4 Deploying continuwuity.toml"
+    local install_script="${PROJECT_ROOT}/scripts/vps-install.sh"
     local toml_tpl="${PROJECT_ROOT}/config/continuwuity/continuwuity.toml.example"
-    if [[ ! -f "${toml_tpl}" ]]; then
-        log_error "Template not found: ${toml_tpl}"
-        exit 1
-    fi
-    envsubst < "${toml_tpl}" | \
-        _ssh_vps "cat > ${COLLAB_VPS_CONFIG_ROOT}/continuwuity/continuwuity.toml"
-    log_ok "continuwuity.toml deployed (MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME})"
+    [[ -f "${install_script}" ]] || { log_error "Missing: ${install_script}"; exit 1; }
+    [[ -f "${toml_tpl}" ]]       || { log_error "Missing: ${toml_tpl}"; exit 1; }
 
-    log_step "4/4 Verifying Docker on VPS"
-    if _ssh_vps "docker --version" 2>/dev/null; then
-        log_ok "Docker available on VPS"
-    else
-        log_error "Docker not found on VPS"
-        log_info  "Install: curl -fsSL https://get.docker.com | sh"
-        exit 1
-    fi
+    log_step "1/5 Uploading vps-install.sh"
+    _scp_to_vps "${install_script}" "/tmp/vps-install.sh"
+    log_ok "Uploaded"
+
+    log_step "2/5 Running vps-install.sh (installs packages, creates users, enables services)"
+    _ssh_vps "sudo bash /tmp/vps-install.sh '${WSPROXY_VERSION:-1.0.0}'"
+    log_ok "Installation complete"
+
+    log_step "3/5 Deploying continuwuity.toml"
+    envsubst < "${toml_tpl}" | _ssh_vps "sudo tee /etc/continuwuity/continuwuity.toml > /dev/null"
+    log_ok "continuwuity.toml deployed (server_name=${MATRIX_SERVER_NAME})"
+
+    log_step "4/5 Deploying Caddyfile"
+    _scp_to_vps "${PROJECT_ROOT}/config/caddy/Caddyfile.example" "/tmp/cshive-Caddyfile"
+    _ssh_vps "sudo mv /tmp/cshive-Caddyfile /etc/caddy/Caddyfile"
+    log_ok "Caddyfile deployed"
+
+    log_step "5/5 Deploying wsproxy environment"
+    _vps_deploy_wsproxy_env
+    log_ok "wsproxy.env deployed"
 
     log_ok "VPS setup complete"
     log_info "Next steps:"
     log_info "  cshive vps-ufw    — configure UFW firewall rules"
-    log_info "  cshive start vps  — deploy and start the homeserver"
+    log_info "  cshive start vps  — start all VPS services"
 }
 
 run_vps_ufw() {
@@ -336,64 +355,64 @@ run_vps_ufw() {
 }
 
 run_vps_deploy_config() {
-    require_env COLLAB_VPS_SSH_HOST COLLAB_VPS_CONFIG_ROOT \
-                MATRIX_SERVER_NAME MATRIX_DOMAIN CONTINUWUITY_PORT ACME_EMAIL
+    require_env COLLAB_VPS_SSH_HOST MATRIX_SERVER_NAME MATRIX_DOMAIN \
+                CONTINUWUITY_PORT CONTINUWUITY_REGISTRATION_SHARED_SECRET \
+                ACME_EMAIL WSPROXY_AS_TOKEN WSPROXY_HS_TOKEN
 
     log_step "Re-deploying config files to VPS"
 
-    log_info "Deploying Caddyfile"
-    _scp_to_vps \
-        "${PROJECT_ROOT}/config/caddy/Caddyfile.example" \
-        "${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile"
-
     log_info "Deploying continuwuity.toml"
-    envsubst < "${PROJECT_ROOT}/config/continuwuity/continuwuity.toml.example" | \
-        _ssh_vps "cat > ${COLLAB_VPS_CONFIG_ROOT}/continuwuity/continuwuity.toml"
+    envsubst < "${PROJECT_ROOT}/config/continuwuity/continuwuity.toml.example" \
+        | _ssh_vps "sudo tee /etc/continuwuity/continuwuity.toml > /dev/null"
+
+    log_info "Deploying Caddyfile"
+    _scp_to_vps "${PROJECT_ROOT}/config/caddy/Caddyfile.example" "/tmp/cshive-Caddyfile"
+    _ssh_vps "sudo mv /tmp/cshive-Caddyfile /etc/caddy/Caddyfile"
+
+    log_info "Deploying wsproxy.env"
+    _vps_deploy_wsproxy_env
 
     log_ok "Config files deployed"
-    log_info "Restart the VPS stack to apply: cshive restart vps"
+    log_info "Reloading Caddy (no restart needed for Caddyfile changes)"
+    _ssh_vps "sudo systemctl reload caddy" 2>/dev/null || \
+        log_warn "Caddy reload failed — run: cshive restart vps"
+    log_info "Restart continuwuity to apply toml changes: cshive restart vps"
 }
 
 # ── Backup ────────────────────────────────────────────────────────────────────
 
 run_backup() {
-    require_env COLLAB_VPS_SSH_HOST COLLAB_PRIMARY_ZT_IP
+    require_env COLLAB_VPS_SSH_HOST
     local today; today="$(date +%Y-%m-%d)"
     local dest="${COLLAB_BACKUP_ROOT}/${today}"
     local latest="${COLLAB_BACKUP_ROOT}/latest"
+    local vol_path="/var/lib/continuwuity"
 
     log_step "Starting cold backup of VPS RocksDB → ${dest}"
-    log_warn "VPS services will be stopped briefly (~30–60s)"
+    log_warn "Continuwuity will be stopped briefly (~30–60s)"
 
-    log_step "1/4 Stopping VPS stack"
-    _compose_vps down
+    log_step "1/3 Stopping Continuwuity on VPS"
+    _ssh_vps "sudo systemctl stop continuwuity"
 
-    log_step "2/4 Resolving volume path on VPS"
-    local vol_path
-    vol_path="$(DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" \
-        docker volume inspect collab-vps_collab_continuwuity_data \
-        --format '{{.Mountpoint}}' 2>/dev/null)" || {
-        log_warn "Volume not found — homeserver may not have been started yet"
-        vol_path=""
-    }
-
-    if [[ -n "${vol_path}" ]]; then
-        log_step "3/4 Rsyncing ${COLLAB_VPS_SSH_HOST}:${vol_path}/ → ${dest}/"
-        mkdir -p "${dest}"
-        local link_arg=""
-        [[ -d "${latest}" ]] && link_arg="--link-dest=${latest}"
-        rsync -az --delete ${link_arg} \
-            "${COLLAB_VPS_SSH_HOST}:${vol_path}/" \
-            "${dest}/"
-        ln -sfn "${dest}" "${latest}"
-        log_ok "Backup complete: ${dest}"
-    else
-        log_warn "Skipping rsync — no volume data found (nothing to back up yet)"
+    log_step "2/3 Rsyncing ${COLLAB_VPS_SSH_HOST}:${vol_path}/ → ${dest}/"
+    mkdir -p "${dest}"
+    local link_arg=""
+    [[ -d "${latest}" ]] && link_arg="--link-dest=${latest}"
+    local ssh_opt="-o StrictHostKeyChecking=accept-new"
+    if [[ -n "${COLLAB_VPS_SSH_KEY:-}" ]]; then
+        ssh_opt="${ssh_opt} -i ${COLLAB_VPS_SSH_KEY/#\~/${HOME}}"
     fi
+    rsync -az --delete --rsync-path="sudo rsync" \
+        -e "ssh ${ssh_opt}" \
+        ${link_arg} \
+        "${COLLAB_VPS_SSH_HOST}:${vol_path}/" \
+        "${dest}/"
+    ln -sfn "${dest}" "${latest}"
+    log_ok "Backup complete: ${dest}"
 
-    log_step "4/4 Restarting VPS stack"
-    _compose_vps up -d
-    log_ok "VPS stack restarted"
+    log_step "3/3 Restarting Continuwuity on VPS"
+    _ssh_vps "sudo systemctl start continuwuity"
+    log_ok "Continuwuity restarted"
 
     log_step "Rotating old backups (keeping last 30 days)"
     _rotate_backups
@@ -437,12 +456,11 @@ run_verify() {
         ok=false
     fi
 
-    log_step "3. VPS Docker daemon reachable"
-    if DOCKER_HOST="ssh://${COLLAB_VPS_SSH_HOST}" docker info &>/dev/null 2>&1; then
-        log_ok "VPS Docker reachable"
+    log_step "3. VPS systemd services installed"
+    if _ssh_vps "systemctl list-unit-files continuwuity.service" 2>/dev/null | grep -q "continuwuity"; then
+        log_ok "Continuwuity service present on VPS"
     else
-        log_error "Cannot reach Docker on VPS via SSH"
-        log_info  "Check: is Docker installed and running on the VPS?"
+        log_warn "Continuwuity service not found on VPS (run: cshive vps-setup)"
         ok=false
     fi
 
@@ -490,7 +508,7 @@ run_logs() {
         continuwuity-private)
             _compose_private logs -f continuwuity-private ;;
         continuwuity|wsproxy|caddy)
-            _compose_vps logs -f "${service}" ;;
+            _ssh_vps "sudo journalctl -u ${service} -f --no-pager" ;;
         *)
             log_error "Unknown service: ${service}"
             log_info  "Valid: signal, whatsapp, discord, continuwuity, continuwuity-private, wsproxy, caddy"

@@ -1,15 +1,14 @@
 ---
-# collab-services-hive — VPS Stack (Gandi VPS)
-# Managed by: cshive start|stop|status|update vps
-# Deployed via: DOCKER_HOST=ssh://${COLLAB_VPS_SSH_HOST} docker compose -f docker-compose.vps.yml
+# DEPRECATED — superseded by native systemd deployment.
+#
+# The VPS (heimdallr.home.zt) runs native apt installs with no Docker.
+# Services are now managed as systemd units via: cshive vps-setup / start / stop / etc.
+#
+# This file is retained as a reference for service configuration, environment variables,
+# and port assignments. See scripts/vps-install.sh for the active deployment approach.
 #
 # Services: Continuwuity (homeserver) + Caddy (TLS) + mautrix-wsproxy (iMessage relay)
 # Bridges run on the primary node — see docker-compose.yml
-#
-# VPS prerequisites (run once):
-#   cshive vps-setup   — creates directories, deploys config files
-#   cshive vps-ufw     — configures UFW: ports 80/443/8448 public; 6167/29331 ZT-only
-#   DNS: matrix.${MATRIX_DOMAIN} A record → VPS public IP (static)
 
 name: collab-vps
 

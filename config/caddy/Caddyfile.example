@@ -1,6 +1,7 @@
-# Caddyfile — collab-services-hive VPS
-# Copy to ${COLLAB_VPS_CONFIG_ROOT}/caddy/Caddyfile and set ACME_EMAIL in .env.
-# Caddy handles TLS automatically via Let's Encrypt (HTTP-01 or ACME DNS).
+# Caddyfile — collab-services-hive VPS (sibeling.org)
+# Deployed to /etc/caddy/Caddyfile on the VPS by: cshive vps-setup or cshive vps-deploy-config
+# Caddy is installed via apt; {$VAR} syntax is resolved by Caddy at runtime from its environment.
+# Caddy handles TLS automatically via Let's Encrypt (HTTP-01 challenge on port 80).
 #
 # After deploy, verify federation: https://federationtester.matrix.org/
 

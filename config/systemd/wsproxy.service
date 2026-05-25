@@ -1,0 +1,14 @@
+[Unit]
+Description=mautrix-wsproxy iMessage relay
+Documentation=https://github.com/mautrix/wsproxy
+After=network.target
+
+[Service]
+User=wsproxy
+EnvironmentFile=/etc/wsproxy/wsproxy.env
+ExecStart=/usr/local/bin/wsproxy
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

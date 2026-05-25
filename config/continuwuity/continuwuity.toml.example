@@ -1,20 +1,20 @@
-# continuwuity.toml — Continuwuity homeserver configuration
-# This is a template. Deploy to VPS with: cshive vps-setup
-# Variables (${...}) are substituted from .env by cshive vps-setup using envsubst.
-#
-# Registration shared secret is NOT in this file — it is passed as the
-# CONDUWUIT_REGISTRATION_SHARED_SECRET environment variable in docker-compose.vps.yml
-# so it stays out of config files that might be logged or inspected.
+# continuwuity.toml — Continuwuity homeserver configuration (VPS / sibeling.org)
+# This is a template. Deploy with: cshive vps-setup or cshive vps-deploy-config
+# Variables (${...}) are substituted from .env by cshive using envsubst.
 
 [global]
 server_name = "${MATRIX_SERVER_NAME}"
 database_backend = "rocksdb"
 database_path = "/var/lib/continuwuity"
 
-# Listen on all interfaces inside the container. Port 6167 is published to
-# 0.0.0.0 on the VPS host — UFW restricts access to ZeroTier subnet only.
+# Listen on all interfaces. Port ${CONTINUWUITY_PORT} is bound on the VPS host —
+# UFW (cshive vps-ufw) restricts it to ZeroTier subnet only.
 address = "0.0.0.0"
 port = ${CONTINUWUITY_PORT}
+
+# Registration shared secret for appservice and admin account creation.
+# Substituted at deploy time — not stored in source control.
+registration_shared_secret = "${CONTINUWUITY_REGISTRATION_SHARED_SECRET}"
 
 # Maximum upload size in bytes. 20MB covers most bridge media; increase if
 # WhatsApp or Signal groups send larger files.
