@@ -91,7 +91,7 @@ All three servers are independent and permanent — Matrix server names are embe
 | Phase | Focus | Status |
 |---|---|---|
 | 0 | Bootstrap (docs, repo, compose skeleton, cshive CLI) | ✅ Complete |
-| 1a | Private homeserver (home.zt) on primary node | 🔄 Scaffold done — needs .env + `cshive private-setup` |
+| 1a | Private homeserver (home.zt) on primary node | ✅ Complete — running on primary node, `cshive private-setup` done 2026-05-25 |
 | 1b | Public homeserver (sibeling.org) on VPS + Caddy TLS | 🔄 Scaffold done — needs .env + operational deploy |
 | 2 | Core bridges (WhatsApp, Signal, Discord) → sibeling.org | 🔲 Not started |
 | 3 | iMessage relay (wsproxy + macOS satellite) | 🔲 Not started |
@@ -101,7 +101,7 @@ All three servers are independent and permanent — Matrix server names are embe
 
 ## Known Open Items
 
-- Phase 1a (private homeserver): `.env` population and `cshive private-setup` not yet run.
+- Phase 1b (public homeserver): `.env` population and operational VPS deploy not yet run.
 - Phase 1b (public homeserver): `.env` population and operational VPS deploy not yet run.
 - Per-repo GitHub project board not yet seeded — create after Phase 0 issues are confirmed closed.
 - Integration registry entry (`queen-hive/docs/integration-registry/collab-services.md`) scaffolded but not yet populated.
