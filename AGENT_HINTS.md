@@ -48,7 +48,8 @@ Apply retrieved context, then read local docs in this order:
 ## Package Manager Baseline
 
 - **macOS (primary node)**: Colima Docker, MacPorts (`/opt/local/bin/port`)
-  - Local ports tree: `/opt/macports-ports-local/`
+  - Local ports tree (dev): `~/Workspaces/Apple/macOS/macports-ports-local/` — author Portfiles here
+  - Local ports tree (deploy): `/opt/macports-ports-local/` — pull-only; MacPorts install source
 - **Containerized**: Docker via Colima (profile `default`, same as portfolio-wide)
 - **Shell**: `/usr/bin/env bash` (use `/opt/local/bin/bash` for features beyond bash 3.2)
 
