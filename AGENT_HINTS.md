@@ -101,7 +101,7 @@ All three servers are independent and permanent — Matrix server names are embe
 
 ## Known Open Items
 
-- Phase 1b (public homeserver): `.env` population and operational VPS deploy not yet run.
+- Phase 1b (public homeserver): VPS (heimdallr.home.zt) runs **native apt installs — no Docker**. The `docker-compose.vps.yml` / compose-over-SSH approach will not work; Phase 1b needs a native systemd deployment plan before proceeding.
 - Phase 1b (public homeserver): `.env` population and operational VPS deploy not yet run.
 - Per-repo GitHub project board not yet seeded — create after Phase 0 issues are confirmed closed.
 - Integration registry entry (`queen-hive/docs/integration-registry/collab-services.md`) scaffolded but not yet populated.
