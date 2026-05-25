@@ -6,7 +6,14 @@ collab-services-hive provides the Matrix homeserver (Continuwuity) and messaging
 
 Repo: `~/Workspaces/UnixLike/collab-services-hive`
 
-Read in this order:
+## Session Start — Memory Protocol
+
+Before reading local docs, retrieve shared context from the common agent-memory store:
+
+1. `retrieve_memory("coding preferences and principles", tags=["ns:preferences"])`
+2. `retrieve_memory("recent decisions and context for collab-services-hive", tags=["ns:coding", "project:collab-services-hive"])`
+
+Apply retrieved context, then read local docs in this order:
 
 1. `AGENT_HINTS.md` — this file; operating context, work rules, repo map
 2. `ARCHITECTURE.md` — service topology, port assignments, deployment roles
@@ -40,13 +47,34 @@ Read in this order:
 
 ## Package Manager Baseline
 
-- **macOS (primary node)**: Colima Docker, MacPorts
+- **macOS (primary node)**: Colima Docker, MacPorts (`/opt/local/bin/port`)
+  - Local ports tree: `/opt/macports-ports-local/`
 - **Containerized**: Docker via Colima (profile `default`, same as portfolio-wide)
-- **Shell**: `/usr/bin/env bash`
+- **Shell**: `/usr/bin/env bash` (use `/opt/local/bin/bash` for features beyond bash 3.2)
 
-## GitHub Projects
+## Token Compression (RTK)
+
+RTK v0.42.0 is installed and active. The Claude Code PreToolUse hook rewrites every Bash call through `rtk` automatically — no manual prefixing needed.
+
+**Key rules:**
+- Run full commands and let RTK compress; don't pre-truncate with `| head` / `| tail`
+- Use `docker logs <container>` (not `docker logs ... | tail -50`) — RTK gets 85-99% savings on log output
+- Use the `Read` tool for file reads, not `cat`/`head` in Bash
+- Run `rtk discover` to find missed optimization opportunities
+- Run `rtk gain` to check token savings for the current session
+
+See `~/.claude/RTK.md` for full agent guidance.
+
+## Task Tracking Policy (GitHub First)
 
 collab-services-hive issues link to the `hive-portfolio` project (#5) in the `eejd` org for cross-repo coordination. Per-repo board: TBD (seed after Phase 0 bootstrap is complete).
+
+Useful commands:
+```bash
+gh issue list --repo eejd/collab-services-hive
+gh issue create --repo eejd/collab-services-hive --title "..." --body "..."
+gh project item-add 5 --owner eejd --url <issue-url>
+```
 
 ## Three-Server Model
 
@@ -70,3 +98,10 @@ All three servers are independent and permanent — Matrix server names are embe
 | 3.5 | Invite-only homeserver (sibeling.net) on primary node | 🔲 Not started |
 | 4 | AI agent integration (MCP Matrix server) | 🔲 Not started |
 | 5 | Future: S3 media offload, MAS/OIDC, LiveKit | 🔲 Not started |
+
+## Known Open Items
+
+- Phase 1a (private homeserver): `.env` population and `cshive private-setup` not yet run.
+- Phase 1b (public homeserver): `.env` population and operational VPS deploy not yet run.
+- Per-repo GitHub project board not yet seeded — create after Phase 0 issues are confirmed closed.
+- Integration registry entry (`queen-hive/docs/integration-registry/collab-services.md`) scaffolded but not yet populated.

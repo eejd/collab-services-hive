@@ -55,6 +55,10 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.collab-private.rule=Host(`matrix.home.zt`)"
       - "traefik.http.routers.collab-private.entrypoints=web"
+      - "traefik.http.routers.collab-private-tls.rule=Host(`matrix.home.zt`)"
+      - "traefik.http.routers.collab-private-tls.entrypoints=websecure"
+      - "traefik.http.routers.collab-private-tls.tls=true"
+      - "traefik.http.routers.collab-private-tls.service=collab-private"
       - "traefik.http.services.collab-private.loadbalancer.server.port=${PRIVATE_CONTINUWUITY_PORT:-6168}"
 
   # ── Signal Bridge ────────────────────────────────────────────────────────────
