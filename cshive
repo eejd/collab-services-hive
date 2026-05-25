@@ -187,7 +187,8 @@ run_status() {
             if [[ -z "${COLLAB_VPS_SSH_HOST:-}" ]]; then
                 log_warn "COLLAB_VPS_SSH_HOST not set — skipping VPS status (set in .env to enable)"
             else
-                _compose_vps ps
+                _compose_vps ps 2>/dev/null || \
+                    log_warn "VPS unreachable at ${COLLAB_VPS_SSH_HOST} — SSH or Docker not available (run: cshive vps-setup)"
             fi
             ;;
         primary)
