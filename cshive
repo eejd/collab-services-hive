@@ -184,7 +184,11 @@ run_status() {
     case "${target}" in
         vps)
             log_step "VPS stack status"
-            _compose_vps ps
+            if [[ -z "${COLLAB_VPS_SSH_HOST:-}" ]]; then
+                log_warn "COLLAB_VPS_SSH_HOST not set — skipping VPS status (set in .env to enable)"
+            else
+                _compose_vps ps
+            fi
             ;;
         primary)
             log_step "Primary stack status"
