@@ -37,6 +37,20 @@ Apply retrieved context, then read local docs in this order:
 - Satellite setup (iMessage bridge on macOS) is documented procedure only — never attempt to automate macOS satellite config from this hive.
 - **Database volumes must be named volumes** — never virtiofs bind mounts for RocksDB or bridge state. See queen-hive's virtiofs DB policy.
 
+## Backup
+
+Two backup targets — both covered by `cshive backup`:
+
+1. **VPS RocksDB** (continuwuity_data on heimdallr): rsync-cold over SSH → `$COLLAB_BACKUP_ROOT` (default `/zfs/Backup/hive/collab/`)
+2. **Local bridge volumes** (colima VM): `collab_signal_data`, `collab_whatsapp_data`, `collab_discord_data`, `collab_private_data` → `$COLLAB_LOCAL_BACKUP_ROOT` (default `/zfs/Backup/hive/collab-local/`), alpine tar.gz, 7 retained
+
+```bash
+cshive backup [--dry-run]    # VPS rsync + local bridge volume export
+cshive backup-status         # VPS backup age + local volume freshness (48h threshold)
+```
+
+VPS backup requires SSH to `$COLLAB_VPS_SSH_HOST` and the target continuwuity container to be stopped. Local bridge volume export works with containers running. `cshive backup` is invoked nightly at 04:00 by `com.qhive.backup`.
+
 ## Key Architecture Constraints
 
 - Continuwuity uses RocksDB; **never binary-swap** database files between Continuwuity, Tuwunel, or Conduit forks — database schemas diverge and swapping causes corruption.

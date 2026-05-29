@@ -25,7 +25,8 @@ VPS SETUP (sibeling.org — run once before first deploy):
     vps-deploy-config           Re-deploy config files to VPS (after editing templates)
 
 OPERATIONS:
-    backup                      Cold backup: stop VPS → rsync RocksDB → restart VPS
+    backup                      VPS RocksDB cold backup + local bridge volume export
+    backup-status               Show last backup age for VPS + all local bridge volumes
     verify                      Preflight: ZeroTier, SSH, homeserver health, hive-net
     logs <service>              Tail logs (signal|whatsapp|discord|continuwuity|continuwuity-private|wsproxy|caddy)
 
@@ -59,6 +60,7 @@ _load_vars() {
     PRIVATE_CONTINUWUITY_PORT="${PRIVATE_CONTINUWUITY_PORT:-6168}"
     PRIVATE_SERVER_NAME="${PRIVATE_SERVER_NAME:-home.zt}"
     COLLAB_BACKUP_ROOT="${COLLAB_BACKUP_ROOT:-/zfs/Backup/hive/collab}"
+    COLLAB_LOCAL_BACKUP_ROOT="${COLLAB_LOCAL_BACKUP_ROOT:-/zfs/Backup/hive/collab-local}"
     COLLAB_VPS_CONFIG_ROOT="${COLLAB_VPS_CONFIG_ROOT:-/opt/collab}"
 }
 
@@ -381,6 +383,28 @@ run_vps_deploy_config() {
 
 # ── Backup ────────────────────────────────────────────────────────────────────
 
+_export_local_volume() {
+    local short_name="$1"
+    local dest_dir="$2"
+    local full_name="${COMPOSE_PROJECT_NAME:-collab-services-hive}_${short_name}"
+
+    if ! docker volume inspect "${full_name}" &>/dev/null 2>&1; then
+        log_info "Volume not found (not yet created): ${full_name} — skipping"
+        return 0
+    fi
+
+    local vol_dest="${dest_dir}/${short_name}"
+    mkdir -p "${vol_dest}"
+    log_info "Exporting ${full_name}…"
+    docker run --rm \
+        -v "${full_name}:/data:ro" \
+        -v "${vol_dest}:/backup" \
+        alpine \
+        sh -c "tar czf /backup/data.tar.gz -C /data . 2>/dev/null || tar cf /backup/data.tar.gz -C /data ."
+    local size; size="$(du -sh "${vol_dest}/data.tar.gz" 2>/dev/null | awk '{print $1}' || echo "?")"
+    log_ok "  ${short_name}: ${size} → ${vol_dest}/data.tar.gz"
+}
+
 run_backup() {
     require_env COLLAB_VPS_SSH_HOST
     local today; today="$(date +%Y-%m-%d)"
@@ -388,13 +412,13 @@ run_backup() {
     local latest="${COLLAB_BACKUP_ROOT}/latest"
     local vol_path="/var/lib/continuwuity"
 
-    log_step "Starting cold backup of VPS RocksDB → ${dest}"
+    log_step "1/2 Cold backup of VPS RocksDB → ${dest}"
     log_warn "Continuwuity will be stopped briefly (~30–60s)"
 
-    log_step "1/3 Stopping Continuwuity on VPS"
+    log_step "1a Stopping Continuwuity on VPS"
     _ssh_vps "sudo systemctl stop continuwuity"
 
-    log_step "2/3 Rsyncing ${COLLAB_VPS_SSH_HOST}:${vol_path}/ → ${dest}/"
+    log_step "1b Rsyncing ${COLLAB_VPS_SSH_HOST}:${vol_path}/ → ${dest}/"
     mkdir -p "${dest}"
     local link_arg=""
     [[ -d "${latest}" ]] && link_arg="--link-dest=${latest}"
@@ -408,14 +432,88 @@ run_backup() {
         "${COLLAB_VPS_SSH_HOST}:${vol_path}/" \
         "${dest}/"
     ln -sfn "${dest}" "${latest}"
-    log_ok "Backup complete: ${dest}"
+    log_ok "VPS backup complete: ${dest}"
 
-    log_step "3/3 Restarting Continuwuity on VPS"
+    log_step "1c Restarting Continuwuity on VPS"
     _ssh_vps "sudo systemctl start continuwuity"
     log_ok "Continuwuity restarted"
 
-    log_step "Rotating old backups (keeping last 30 days)"
+    log_step "Rotating VPS backups (keeping last 30 days)"
     _rotate_backups
+
+    log_step "2/2 Exporting local bridge volumes → ${COLLAB_LOCAL_BACKUP_ROOT}"
+    export_docker_host
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    local local_dest="${COLLAB_LOCAL_BACKUP_ROOT}/${ts}"
+    mkdir -p "${local_dest}"
+    for vol in collab_signal_data collab_whatsapp_data collab_discord_data collab_private_data; do
+        _export_local_volume "${vol}" "${local_dest}"
+    done
+
+    log_step "Rotating local volume exports (keeping 7 most recent)"
+    # shellcheck disable=SC2012
+    local old; old="$(ls -1dt "${COLLAB_LOCAL_BACKUP_ROOT}"/[0-9]*-[0-9]* 2>/dev/null | tail -n +8)"
+    [[ -n "${old}" ]] && echo "${old}" | xargs rm -rf && log_ok "Old local exports pruned"
+
+    log_ok "Backup complete (VPS + local bridges)"
+}
+
+run_backup_status() {
+    local now; now=$(date +%s)
+    local threshold_hours=48
+    local all_ok=true
+
+    printf "%-28s  %-22s  %6s  %s\n" "VOLUME / SERVICE" "LAST BACKUP" "AGE" "STATUS"
+    printf '%.0s─' {1..72}; echo
+
+    # VPS RocksDB — check via COLLAB_BACKUP_ROOT/latest symlink mtime
+    local vps_label="continuwuity (VPS RocksDB)"
+    local vps_latest="${COLLAB_BACKUP_ROOT}/latest"
+    if [[ -d "${vps_latest}" ]]; then
+        local mtime; mtime=$(stat -f %m "${vps_latest}" 2>/dev/null || stat -c %Y "${vps_latest}")
+        local age_h=$(( (now - mtime) / 3600 ))
+        local ts; ts=$(date -r "${mtime}" "+%Y-%m-%d %H:%M" 2>/dev/null || date -d "@${mtime}" "+%Y-%m-%d %H:%M")
+        if (( age_h < threshold_hours )); then
+            printf "%-28s  %-22s  %4dh  ✓\n" "${vps_label}" "${ts}" "${age_h}"
+        else
+            printf "%-28s  %-22s  %4dh  ⚠ STALE\n" "${vps_label}" "${ts}" "${age_h}"
+            all_ok=false
+        fi
+    else
+        printf "%-28s  %-22s  %6s  ✗ MISSING\n" "${vps_label}" "—" "—"
+        all_ok=false
+    fi
+
+    # Local bridge volumes — newest tar.gz per volume under COLLAB_LOCAL_BACKUP_ROOT
+    for vol in collab_signal_data collab_whatsapp_data collab_discord_data collab_private_data; do
+        local newest=""
+        newest=$(find "${COLLAB_LOCAL_BACKUP_ROOT}" -path "*/${vol}/data.tar.gz" -type f 2>/dev/null \
+            | sort | tail -1)
+        if [[ -z "${newest}" ]]; then
+            printf "%-28s  %-22s  %6s  ✗ MISSING\n" "${vol}" "—" "—"
+            all_ok=false
+            continue
+        fi
+        local mtime; mtime=$(stat -f %m "${newest}" 2>/dev/null || stat -c %Y "${newest}")
+        local age_h=$(( (now - mtime) / 3600 ))
+        local size; size=$(du -sh "${newest}" 2>/dev/null | cut -f1)
+        local ts; ts=$(date -r "${mtime}" "+%Y-%m-%d %H:%M" 2>/dev/null || date -d "@${mtime}" "+%Y-%m-%d %H:%M")
+        if (( age_h < threshold_hours )); then
+            printf "%-28s  %-22s  %4dh  ✓ (%s)\n" "${vol}" "${ts}" "${age_h}" "${size}"
+        else
+            printf "%-28s  %-22s  %4dh  ⚠ STALE (%s)\n" "${vol}" "${ts}" "${age_h}" "${size}"
+            all_ok=false
+        fi
+    done
+
+    echo ""
+    if $all_ok; then
+        log_ok "All collab backups fresh (< ${threshold_hours}h)."
+        return 0
+    else
+        log_error "One or more backups are missing or stale."
+        return 1
+    fi
 }
 
 _rotate_backups() {
@@ -534,8 +632,9 @@ main() {
         vps-setup)          run_vps_setup ;;
         vps-ufw)            run_vps_ufw ;;
         vps-deploy-config)  run_vps_deploy_config ;;
-        backup)  run_backup ;;
-        verify)  run_verify ;;
+        backup)         run_backup ;;
+        backup-status)  run_backup_status ;;
+        verify)         run_verify ;;
         logs)    run_logs "$@" ;;
         *) log_error "Unknown command: ${cmd}"; usage; exit 1 ;;
     esac
